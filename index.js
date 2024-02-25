@@ -1,6 +1,7 @@
 const _ = require('lodash');
 const atob = require('atob');
 const fs = require('fs');
+const moment = require('moment');
 const inquirer = require('inquirer');
 const path = require('path');
 const ora = require('ora');
@@ -123,61 +124,83 @@ async function fetchAndSaveAttachments(auth, attachments) {
   let counter = 0;
   let processed = 0;
   spinner.text = "Fetching attachment from mails"
-  for (index in attachments) {
-    if (attachments[index].id) {
-      promises.push(fetchAndSaveAttachment(auth, attachments[index]));
-      counter++;
-      processed++;
-      if (counter === 100) {
-        attachs = await Promise.all(promises);
-        _.merge(results, attachs);
-        promises = [];
-        counter = 0;
-        spinner.text = processed + " attachemets are saved"
-      }
+
+  // Group attachments by mailId
+  const attachmentsGroupedByMailId = _.groupBy(attachments, 'mailId');
+
+  for (const mailId in attachmentsGroupedByMailId) {
+    const attachmentsForMail = attachmentsGroupedByMailId[mailId];
+    promises.push(fetchMessageDetailsAndSaveAttachments(auth, mailId, attachmentsForMail));
+    counter++;
+    processed++;
+    if (counter === 100) {
+      attachs = await Promise.all(promises);
+      _.merge(results, attachs);
+      promises = [];
+      counter = 0;
+      spinner.text = processed + " attachments are saved"
     }
   }
+
   attachs = await Promise.all(promises);
   _.merge(results, attachs);
   return results;
 }
 
-function fetchAndSaveAttachment(auth, attachment) {
-  return new Promise((resolve, reject) => {
-    gmail.users.messages.attachments.get({
-      auth: auth,
-      userId: 'me',
-      messageId: attachment.mailId,
-      id: attachment.id
-    }, function (err, response) {
-      if (err) {
-        console.log('The API returned an error: ' + err);
-        reject(err);
-      }
-      if (!response) {
-        console.log('Empty response: ' + response);
-        reject(response);
-      }
-      var data = response.data.data.replaceAll('-', '+');
-      data = data.replaceAll('_', '/');
-      var content = fixBase64(data);
-      resolve(content);
-    });
-  })
-    .then((content) => {
-      var fileName = path.resolve(__dirname, 'files', attachment.name);
-      return FileHelper.isFileExist(fileName)
-        .then((isExist) => {
-          if (isExist) {
-            return FileHelper.getNewFileName(fileName);
-          }
-          return fileName;
-        })
-        .then((availableFileName) => {
-          return FileHelper.saveFile(availableFileName, content);
-        })
-    })
+async function fetchMessageDetailsAndSaveAttachments(auth, mailId, attachments) {
+  const attachmentDetailsPromises = attachments.map(async (attachment) => {
+    try {
+      const response = await gmail.users.messages.get({
+        auth: auth,
+        userId: 'me',
+        id: mailId,
+        format: 'minimal', // Request minimal format
+      });
+
+      // Extract timestamp and format it
+      const emailTimestamp = response.data.internalDate;
+      const formattedTimestamp = moment(parseInt(emailTimestamp)).format('YYYY-MM-DD_HHmmss');
+
+      // Construct the new file name with the timestamp
+      const fileName = path.resolve(__dirname, 'files', `${attachment.name}-${formattedTimestamp}${path.extname(attachment.name)}`);
+
+      return {
+        attachment,
+        fileName,
+        emailTimestamp
+      };
+    } catch (error) {
+      throw new Error(`Failed to fetch message details for attachment: ${attachment.id}`, error);
+    }
+  });
+
+  const attachmentDetails = await Promise.all(attachmentDetailsPromises);
+
+  const savePromises = attachmentDetails.map(async ({ attachment, fileName, emailTimestamp }) => {
+    try {
+      const data = await fetchAttachmentData(auth, attachment);
+      await FileHelper.saveFile(fileName, data, emailTimestamp);
+      return attachment;
+    } catch (error) {
+      throw new Error(`Failed to save attachment: ${attachment.id}`, error);
+    }
+  });
+
+  return await Promise.all(savePromises);
 }
+
+async function fetchAttachmentData(auth, attachment) {
+  const response = await gmail.users.messages.attachments.get({
+    auth: auth,
+    userId: 'me',
+    messageId: attachment.mailId,
+    id: attachment.id,
+  });
+
+  const data = response.data.data.replaceAll('-', '+').replaceAll('_', '/');
+  return fixBase64(data);
+}
+
 
 
 function pluckAllAttachments(mails) {
@@ -265,6 +288,8 @@ function askForMail() {
 
 function getListOfMailIdByLabel(auth, labelId, maxResults = 500, nextPageToken) {
   return new Promise((resolve, reject) => {
+
+
     gmail.users.messages.list({
       auth: auth,
       userId: 'me',
