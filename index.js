@@ -162,7 +162,7 @@ async function fetchMessageDetailsAndSaveAttachments(auth, mailId, attachments) 
       const formattedTimestamp = moment(parseInt(emailTimestamp)).format('YYYY-MM-DD_HHmmss');
 
       // Construct the new file name with the timestamp
-      const fileName = path.resolve(__dirname, 'files', `${attachment.name}-${formattedTimestamp}${path.extname(attachment.name)}`);
+      const fileName = path.resolve(__dirname, 'files', `${path.basename(attachment.name, path.extname(attachment.name))}-${formattedTimestamp}${path.extname(attachment.name)}`);
 
       return {
         attachment,
